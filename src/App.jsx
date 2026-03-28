@@ -7,6 +7,7 @@ import {
 // ─── Firestore Helpers ──────────────────────────────────────────────
 const recipesCol = collection(db, "recipes");
 const weekplanCol = collection(db, "weekplan");
+const customItemsCol = collection(db, "customItems");
 
 async function fbPut(col, item) {
   await setDoc(doc(col, item.id), item);
@@ -63,13 +64,15 @@ export default function App() {
   const [showForm, setShowForm] = useState(false);
   const [viewRecipe, setViewRecipe] = useState(null);
   const [shoppingList, setShoppingList] = useState(null);
+  const [customItems, setCustomItems] = useState([]);
   const [toast, setToast] = useState(null);
 
   // Real-time sync with Firestore
   useEffect(() => {
     let recipesLoaded = false;
     let planLoaded = false;
-    const checkLoaded = () => { if (recipesLoaded && planLoaded) setLoaded(true); };
+    let customLoaded = false;
+    const checkLoaded = () => { if (recipesLoaded && planLoaded && customLoaded) setLoaded(true); };
 
     const unsubRecipes = onSnapshot(query(recipesCol), (snap) => {
       const data = snap.docs.map(d => d.data());
@@ -86,7 +89,13 @@ export default function App() {
       checkLoaded();
     });
 
-    return () => { unsubRecipes(); unsubPlan(); };
+    const unsubCustom = onSnapshot(query(customItemsCol), (snap) => {
+      setCustomItems(snap.docs.map(d => d.data()));
+      customLoaded = true;
+      checkLoaded();
+    });
+
+    return () => { unsubRecipes(); unsubPlan(); unsubCustom(); };
   }, []);
 
   const showToast = useCallback((msg) => {
@@ -128,6 +137,16 @@ export default function App() {
       }
     }
     showToast("Wochenplan generiert ✓");
+  };
+
+  const addCustomItem = async (name) => {
+    const item = { id: `custom_${Date.now()}`, name: name.trim() };
+    await fbPut(customItemsCol, item);
+    showToast("Artikel hinzugefügt ✓");
+  };
+
+  const removeCustomItem = async (id) => {
+    await fbDelete(customItemsCol, id);
   };
 
   const generateShoppingList = () => {
@@ -199,7 +218,8 @@ export default function App() {
             onAssign={assignMeal} onClear={clearMeal} onShopping={generateShoppingList} />
         )}
         {view === "shopping" && shoppingList && (
-          <ShoppingListView list={shoppingList} onBack={() => setView("plan")} />
+          <ShoppingListView list={shoppingList} onBack={() => setView("plan")}
+            customItems={customItems} onAddCustom={addCustomItem} onRemoveCustom={removeCustomItem} />
         )}
       </div>
 
@@ -640,12 +660,24 @@ function MealPicker({ day, meal, recipes, onSelect, onClose }) {
 }
 
 // ─── Shopping List ──────────────────────────────────────────────────
-function ShoppingListView({ list, onBack }) {
+function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCustom }) {
   const [checked, setChecked] = useState({});
+  const [newItem, setNewItem] = useState("");
   const toggle = (key) => setChecked(prev => ({ ...prev, [key]: !prev[key] }));
   const categories = Object.keys(list).sort();
-  const total = Object.values(list).reduce((s, arr) => s + arr.length, 0);
+  const total = Object.values(list).reduce((s, arr) => s + arr.length, 0) + customItems.length;
   const done = Object.values(checked).filter(Boolean).length;
+
+  const handleAdd = () => {
+    if (!newItem.trim()) return;
+    onAddCustom(newItem);
+    setNewItem("");
+  };
+
+  const inputStyle = {
+    flex: 1, padding: "10px 14px", background: theme.surface, border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm, color: theme.text, fontSize: 14, outline: "none"
+  };
 
   return (
     <div>
@@ -691,6 +723,47 @@ function ShoppingListView({ list, onBack }) {
           </div>
         </div>
       ))}
+
+      {/* Custom Items Section */}
+      <div style={{ marginBottom: 16 }}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: "#a78bfa", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>📝 Eigene Artikel</h3>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <input value={newItem} onChange={e => setNewItem(e.target.value)} placeholder="Artikel hinzufügen..."
+            onKeyDown={e => { if (e.key === "Enter") handleAdd(); }}
+            style={inputStyle} />
+          <Btn onClick={handleAdd} style={{ padding: "10px 16px", flexShrink: 0 }}>＋</Btn>
+        </div>
+
+        {customItems.length > 0 && (
+          <div style={{ background: theme.card, borderRadius: theme.radiusSm, overflow: "hidden" }}>
+            {customItems.map((item, i) => {
+              const key = `custom_${item.id}`;
+              const isDone = checked[key];
+              return (
+                <div key={item.id} style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "11px 14px",
+                  borderBottom: i < customItems.length - 1 ? `1px solid ${theme.border}` : "none",
+                  opacity: isDone ? 0.4 : 1, transition: "opacity .2s"
+                }}>
+                  <div onClick={() => toggle(key)} style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, cursor: "pointer" }}>
+                    <div style={{
+                      width: 22, height: 22, borderRadius: 6, border: `2px solid ${isDone ? theme.success : theme.border}`,
+                      background: isDone ? theme.successSoft : "transparent",
+                      display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, flexShrink: 0
+                    }}>{isDone && "✓"}</div>
+                    <span style={{ textDecoration: isDone ? "line-through" : "none", fontSize: 14 }}>{item.name}</span>
+                  </div>
+                  <button onClick={() => onRemoveCustom(item.id)} style={{
+                    background: "none", border: "none", color: theme.danger, fontSize: 14, cursor: "pointer", padding: 4
+                  }}>✕</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
