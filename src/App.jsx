@@ -19,7 +19,8 @@ async function fbDelete(col, id) {
 // ─── Constants ──────────────────────────────────────────────────────
 const DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 const MEALS = ["Frühstück", "Mittagessen", "Abendessen"];
-const ALL_TAGS = ["Vegetarisch", "Vegan", "Schnell", "Deftig", "Süß", "Low-Carb", "Asiatisch", "Italienisch", "Deutsch", "Snack"];
+const ALL_TAGS = ["Frühstück", "Mittagessen", "Abendessen", "Vegetarisch", "Vegan", "Schnell", "Deftig", "Süß", "Low-Carb", "Asiatisch", "Italienisch", "Deutsch", "Snack"];
+const MEAL_TAGS = ["Frühstück", "Mittagessen", "Abendessen"];
 const UNITS = ["g", "kg", "ml", "l", "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Becher", "Scheibe"];
 
 const CATEGORY_MAP = {
@@ -132,11 +133,23 @@ export default function App() {
     for (const day of DAYS) {
       for (const meal of MEALS) {
         const key = `${day}-${meal}`;
-        const r = recipes[Math.floor(Math.random() * recipes.length)];
+        // Filter recipes that have the matching meal tag
+        const mealRecipes = recipes.filter(r => (r.tags || []).includes(meal));
+        // Fallback to all recipes if none have the tag
+        const pool = mealRecipes.length > 0 ? mealRecipes : recipes;
+        const r = pool[Math.floor(Math.random() * pool.length)];
         await fbPut(weekplanCol, { id: key, day, meal, recipeId: r.id });
       }
     }
     showToast("Wochenplan generiert ✓");
+  };
+
+  const clearPlan = async () => {
+    for (const key of Object.keys(weekPlan)) {
+      await fbDelete(weekplanCol, key);
+    }
+    setShoppingList(null);
+    showToast("Wochenplan geleert ✓");
   };
 
   const addCustomItem = async (name) => {
@@ -215,7 +228,7 @@ export default function App() {
         )}
         {view === "plan" && (
           <WeekPlanView weekPlan={weekPlan} recipes={recipes} onGenerate={generatePlan}
-            onAssign={assignMeal} onClear={clearMeal} onShopping={generateShoppingList} />
+            onAssign={assignMeal} onClear={clearMeal} onClearAll={clearPlan} onShopping={generateShoppingList} />
         )}
         {view === "shopping" && (
           <ShoppingListView list={shoppingList} onBack={() => setView("plan")}
@@ -448,9 +461,16 @@ function RecipeForm({ recipe, onSave, onCancel }) {
         <Btn variant="secondary" onClick={() => setServings(servings + 1)} style={{ padding: "8px 14px" }}>+</Btn>
       </div>
 
+      <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Mahlzeit</label>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {MEAL_TAGS.map(t => (
+          <TagChip key={t} label={t} active={tags.includes(t)} onClick={() => toggleTag(t)} />
+        ))}
+      </div>
+
       <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Tags</label>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
-        {ALL_TAGS.map(t => (
+        {ALL_TAGS.filter(t => !MEAL_TAGS.includes(t)).map(t => (
           <TagChip key={t} label={t} active={tags.includes(t)} onClick={() => toggleTag(t)} />
         ))}
       </div>
@@ -557,7 +577,7 @@ function RecipeDetail({ recipe, onBack, onEdit, onDelete }) {
 }
 
 // ─── Week Plan ──────────────────────────────────────────────────────
-function WeekPlanView({ weekPlan, recipes, onGenerate, onAssign, onClear, onShopping }) {
+function WeekPlanView({ weekPlan, recipes, onGenerate, onAssign, onClear, onClearAll, onShopping }) {
   const [picker, setPicker] = useState(null);
   const filledCount = Object.keys(weekPlan).length;
 
@@ -565,9 +585,9 @@ function WeekPlanView({ weekPlan, recipes, onGenerate, onAssign, onClear, onShop
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
         <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Wochenplan</h2>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Btn variant="secondary" onClick={onGenerate}>🎲 Generieren</Btn>
-          {filledCount > 0 && <Btn onClick={onShopping}>🛒 Einkaufsliste</Btn>}
+          {filledCount > 0 && <Btn variant="danger" onClick={() => { if (confirm("Gesamten Wochenplan leeren?")) onClearAll(); }}>🗑️ Leeren</Btn>}
         </div>
       </div>
 
