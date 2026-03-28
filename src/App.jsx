@@ -168,7 +168,7 @@ export default function App() {
     });
     Object.values(grouped).forEach(arr => arr.sort((a, b) => a.name.localeCompare(b.name)));
     setShoppingList(grouped);
-    setView("shopping");
+    showToast("Einkaufsliste aktualisiert ✓");
   };
 
   if (!loaded) return (
@@ -217,9 +217,10 @@ export default function App() {
           <WeekPlanView weekPlan={weekPlan} recipes={recipes} onGenerate={generatePlan}
             onAssign={assignMeal} onClear={clearMeal} onShopping={generateShoppingList} />
         )}
-        {view === "shopping" && shoppingList && (
+        {view === "shopping" && (
           <ShoppingListView list={shoppingList} onBack={() => setView("plan")}
-            customItems={customItems} onAddCustom={addCustomItem} onRemoveCustom={removeCustomItem} />
+            customItems={customItems} onAddCustom={addCustomItem} onRemoveCustom={removeCustomItem}
+            weekPlan={weekPlan} recipes={recipes} onGenerateList={generateShoppingList} />
         )}
       </div>
 
@@ -660,13 +661,17 @@ function MealPicker({ day, meal, recipes, onSelect, onClose }) {
 }
 
 // ─── Shopping List ──────────────────────────────────────────────────
-function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCustom }) {
+function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCustom, weekPlan, recipes, onGenerateList }) {
   const [checked, setChecked] = useState({});
   const [newItem, setNewItem] = useState("");
   const toggle = (key) => setChecked(prev => ({ ...prev, [key]: !prev[key] }));
-  const categories = Object.keys(list).sort();
-  const total = Object.values(list).reduce((s, arr) => s + arr.length, 0) + customItems.length;
+
+  const categories = list ? Object.keys(list).sort() : [];
+  const recipeItemCount = list ? Object.values(list).reduce((s, arr) => s + arr.length, 0) : 0;
+  const total = recipeItemCount + customItems.length;
   const done = Object.values(checked).filter(Boolean).length;
+
+  const hasWeekPlan = Object.keys(weekPlan).length > 0;
 
   const handleAdd = () => {
     if (!newItem.trim()) return;
@@ -681,17 +686,25 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
 
   return (
     <div>
-      <Btn variant="ghost" onClick={onBack} style={{ marginBottom: 12 }}>← Zurück zum Plan</Btn>
-
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Einkaufsliste</h2>
-        <span style={{ fontSize: 13, color: theme.textDim }}>{done}/{total} erledigt</span>
+        {total > 0 && <span style={{ fontSize: 13, color: theme.textDim }}>{done}/{total} erledigt</span>}
       </div>
 
-      <div style={{ width: "100%", height: 6, background: theme.surface, borderRadius: 3, marginBottom: 20, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${total > 0 ? (done / total * 100) : 0}%`, background: theme.success, borderRadius: 3, transition: "width .3s" }} />
-      </div>
+      {total > 0 && (
+        <div style={{ width: "100%", height: 6, background: theme.surface, borderRadius: 3, marginBottom: 20, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${total > 0 ? (done / total * 100) : 0}%`, background: theme.success, borderRadius: 3, transition: "width .3s" }} />
+        </div>
+      )}
 
+      {/* Generate from recipes button */}
+      {hasWeekPlan && (
+        <Btn variant="secondary" onClick={onGenerateList} style={{ width: "100%", justifyContent: "center", marginBottom: 16 }}>
+          🔄 {list ? "Rezept-Liste neu generieren" : "Einkaufsliste aus Wochenplan generieren"}
+        </Btn>
+      )}
+
+      {/* Recipe-based items */}
       {categories.map(cat => (
         <div key={cat} style={{ marginBottom: 16 }}>
           <h3 style={{ fontSize: 13, fontWeight: 600, color: theme.accent, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>{cat}</h3>
@@ -724,7 +737,7 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
         </div>
       ))}
 
-      {/* Custom Items Section */}
+      {/* Custom Items Section - always visible */}
       <div style={{ marginBottom: 16 }}>
         <h3 style={{ fontSize: 13, fontWeight: 600, color: "#a78bfa", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>📝 Eigene Artikel</h3>
 
@@ -735,7 +748,7 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
           <Btn onClick={handleAdd} style={{ padding: "10px 16px", flexShrink: 0 }}>＋</Btn>
         </div>
 
-        {customItems.length > 0 && (
+        {customItems.length > 0 ? (
           <div style={{ background: theme.card, borderRadius: theme.radiusSm, overflow: "hidden" }}>
             {customItems.map((item, i) => {
               const key = `custom_${item.id}`;
@@ -761,6 +774,10 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
                 </div>
               );
             })}
+          </div>
+        ) : (
+          <div style={{ textAlign: "center", padding: 24, color: theme.textMuted, fontSize: 13 }}>
+            Noch keine eigenen Artikel
           </div>
         )}
       </div>
