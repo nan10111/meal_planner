@@ -66,6 +66,7 @@ export default function App() {
   const [viewRecipe, setViewRecipe] = useState(null);
   const [shoppingList, setShoppingList] = useState(null);
   const [customItems, setCustomItems] = useState([]);
+  const [showImport, setShowImport] = useState(false);
   const [toast, setToast] = useState(null);
 
   // Real-time sync with Firestore
@@ -215,10 +216,14 @@ export default function App() {
 
       {/* Content */}
       <div style={{ padding: "16px 16px 0" }}>
-        {view === "recipes" && !showForm && !viewRecipe && (
-          <RecipeList recipes={recipes} onAdd={() => { setEditRecipe(null); setShowForm(true); }} onView={setViewRecipe} />
+        {view === "recipes" && !showForm && !viewRecipe && !showImport && (
+          <RecipeList recipes={recipes} onAdd={() => { setEditRecipe(null); setShowForm(true); }}
+            onImport={() => setShowImport(true)} onView={setViewRecipe} />
         )}
-        {view === "recipes" && showForm && (
+        {view === "recipes" && showImport && (
+          <RecipeImport onSave={saveRecipe} onCancel={() => setShowImport(false)} />
+        )}
+        {view === "recipes" && showForm && !showImport && (
           <RecipeForm recipe={editRecipe} onSave={saveRecipe} onCancel={() => { setShowForm(false); setEditRecipe(null); }} />
         )}
         {view === "recipes" && viewRecipe && (
@@ -248,7 +253,7 @@ export default function App() {
           { id: "plan", icon: "📅", label: "Wochenplan" },
           { id: "shopping", icon: "🛒", label: "Einkauf" },
         ].map(tab => (
-          <button key={tab.id} onClick={() => { setView(tab.id); setShowForm(false); setViewRecipe(null); }}
+          <button key={tab.id} onClick={() => { setView(tab.id); setShowForm(false); setViewRecipe(null); setShowImport(false); }}
             style={{
               background: "none", border: "none", color: view === tab.id ? theme.accent : theme.textDim,
               display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
@@ -299,7 +304,7 @@ function TagChip({ label, active, onClick }) {
 }
 
 // ─── Recipe List ────────────────────────────────────────────────────
-function RecipeList({ recipes, onAdd, onView }) {
+function RecipeList({ recipes, onAdd, onImport, onView }) {
   const [search, setSearch] = useState("");
   const [filterTag, setFilterTag] = useState(null);
 
@@ -313,7 +318,10 @@ function RecipeList({ recipes, onAdd, onView }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>Meine Rezepte <span style={{ color: theme.textMuted, fontWeight: 400 }}>({recipes.length})</span></h2>
-        <Btn onClick={onAdd}>＋ Neu</Btn>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn variant="secondary" onClick={onImport}>📋 Import</Btn>
+          <Btn onClick={onAdd}>＋ Neu</Btn>
+        </div>
       </div>
 
       <input placeholder="🔍 Suchen..." value={search} onChange={e => setSearch(e.target.value)}
@@ -676,6 +684,274 @@ function MealPicker({ day, meal, recipes, onSelect, onClose }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Recipe Parser ──────────────────────────────────────────────────
+function parseRecipeText(text) {
+  const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) return null;
+
+  // Unit patterns for German recipes
+  const unitMap = {
+    "g": "g", "gr": "g", "gramm": "g",
+    "kg": "kg", "kilo": "kg", "kilogramm": "kg",
+    "ml": "ml", "milliliter": "ml",
+    "l": "l", "liter": "l",
+    "el": "EL", "esslöffel": "EL", "essl": "EL",
+    "tl": "TL", "teelöffel": "TL", "teel": "TL",
+    "stk": "Stück", "stück": "Stück", "stck": "Stück", "st": "Stück",
+    "prise": "Prise", "prisen": "Prise",
+    "bund": "Bund",
+    "dose": "Dose", "dosen": "Dose",
+    "becher": "Becher",
+    "scheibe": "Scheibe", "scheiben": "Scheibe",
+    "pkg": "Stück", "pck": "Stück", "packung": "Stück", "päckchen": "Stück",
+    "tasse": "Becher", "tassen": "Becher",
+    "zehe": "Stück", "zehen": "Stück",
+    "msp": "Prise",
+  };
+
+  // Regex: optional amount (with fractions), optional unit, then ingredient name
+  const ingredientRegex = /^(\d+[\d.,\/\s]*)\s*(g|gr|gramm|kg|kilo|kilogramm|ml|milliliter|l|liter|el|esslöffel|essl|tl|teelöffel|teel|stk|stück|stck|st|prise|prisen|bund|dose|dosen|becher|scheibe|scheiben|pkg|pck|packung|päckchen|tasse|tassen|zehe|zehen|msp)?\s+(.+)/i;
+
+  // Also match lines like "Salz und Pfeffer" or "etwas Öl" without amounts
+  const vagueRegex = /^(etwas|n\.?\s*b\.?|nach belieben|etwas|etwas|etwas)\s+(.+)/i;
+
+  const ingredients = [];
+  const steps = [];
+  let name = "";
+  let foundIngredients = false;
+  let inSteps = false;
+  let servings = 4;
+
+  // Try to detect servings
+  const servingsRegex = /(?:für\s+)?(\d+)\s*(?:portionen|personen|servings|pers\.|port\.)/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // First non-empty line without a number = recipe name
+    if (!name && !line.match(/^\d/) && !line.match(servingsRegex)) {
+      // Skip common headers
+      if (!line.match(/^(zutaten|zutat|ingredients|zubereitung|anleitung|preparation)/i)) {
+        name = line.replace(/^(rezept:\s*|recipe:\s*)/i, "");
+        continue;
+      }
+    }
+
+    // Check for servings
+    const servMatch = line.match(servingsRegex);
+    if (servMatch) {
+      servings = parseInt(servMatch[1]) || 4;
+      continue;
+    }
+
+    // Skip section headers
+    if (line.match(/^(zutaten|zutat|ingredients):?\s*$/i)) {
+      foundIngredients = true;
+      inSteps = false;
+      continue;
+    }
+    if (line.match(/^(zubereitung|anleitung|preparation|schritte|steps|so geht'?s|und so wird'?s gemacht):?\s*$/i)) {
+      inSteps = true;
+      continue;
+    }
+
+    // Try to parse as ingredient
+    const ingMatch = line.replace(/^[-•●◦▪·]\s*/, "").match(ingredientRegex);
+    if (ingMatch && !inSteps) {
+      const rawAmount = ingMatch[1].replace(",", ".").replace(/\s/g, "");
+      let amount = 0;
+      if (rawAmount.includes("/")) {
+        const parts = rawAmount.split("/");
+        amount = parseFloat(parts[0]) / parseFloat(parts[1]);
+      } else {
+        amount = parseFloat(rawAmount);
+      }
+      const unitRaw = (ingMatch[2] || "").toLowerCase();
+      const unit = unitMap[unitRaw] || "Stück";
+      const ingName = ingMatch[3].replace(/[,;]$/, "").trim();
+      if (ingName.length > 0) {
+        ingredients.push({ name: ingName, amount: amount || 1, unit });
+        foundIngredients = true;
+        continue;
+      }
+    }
+
+    // Check for vague ingredients like "etwas Öl"
+    const vagueMatch = line.replace(/^[-•●◦▪·]\s*/, "").match(vagueRegex);
+    if (vagueMatch && !inSteps) {
+      ingredients.push({ name: vagueMatch[2].trim(), amount: 1, unit: "Prise" });
+      foundIngredients = true;
+      continue;
+    }
+
+    // If we already found ingredients and this line doesn't match, it's probably steps
+    if (foundIngredients || inSteps) {
+      // Remove step numbering
+      const stepText = line.replace(/^(\d+[\.\)]\s*|schritt\s*\d+:?\s*)/i, "");
+      if (stepText.length > 0) {
+        steps.push(stepText);
+        inSteps = true;
+      }
+    }
+  }
+
+  // If no name was found, use first line
+  if (!name && lines.length > 0) {
+    name = lines[0];
+  }
+
+  return {
+    id: `recipe_${Date.now()}`,
+    name: name || "Importiertes Rezept",
+    servings,
+    tags: [],
+    ingredients,
+    steps: steps.join("\n"),
+    photo: null
+  };
+}
+
+// ─── Recipe Import Component ────────────────────────────────────────
+function RecipeImport({ onSave, onCancel }) {
+  const [text, setText] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editServings, setEditServings] = useState(4);
+  const [editTags, setEditTags] = useState([]);
+  const [editIngredients, setEditIngredients] = useState([]);
+  const [editSteps, setEditSteps] = useState("");
+
+  const handleParse = () => {
+    if (!text.trim()) return;
+    const result = parseRecipeText(text);
+    if (result) {
+      setParsed(result);
+      setEditName(result.name);
+      setEditServings(result.servings);
+      setEditIngredients(result.ingredients.length > 0 ? result.ingredients : [{ name: "", amount: "", unit: "g" }]);
+      setEditSteps(result.steps);
+    }
+  };
+
+  const toggleTag = (t) => setEditTags(prev => prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]);
+
+  const updateIng = (i, field, val) => {
+    const n = [...editIngredients];
+    n[i] = { ...n[i], [field]: field === "amount" ? (val === "" ? "" : Number(val)) : val };
+    setEditIngredients(n);
+  };
+  const addIng = () => setEditIngredients([...editIngredients, { name: "", amount: "", unit: "g" }]);
+  const removeIng = (i) => setEditIngredients(editIngredients.filter((_, idx) => idx !== i));
+
+  const handleSave = () => {
+    if (!editName.trim()) return;
+    const validIngs = editIngredients.filter(i => i.name.trim());
+    onSave({
+      id: `recipe_${Date.now()}`,
+      name: editName.trim(),
+      servings: editServings,
+      tags: editTags,
+      ingredients: validIngs,
+      steps: editSteps,
+      photo: null
+    });
+  };
+
+  const inputStyle = {
+    width: "100%", padding: "11px 14px", background: theme.surface, border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm, color: theme.text, fontSize: 14, outline: "none"
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>📋 Rezept importieren</h2>
+        <Btn variant="ghost" onClick={onCancel}>✕</Btn>
+      </div>
+
+      {!parsed ? (
+        <>
+          <p style={{ fontSize: 13, color: theme.textDim, marginBottom: 12, lineHeight: 1.5 }}>
+            Kopiere ein Rezept aus dem Internet (z.B. von Chefkoch, Lecker.de) und füge es hier ein.
+            Der Parser erkennt automatisch Zutaten, Mengen und Zubereitung.
+          </p>
+
+          <textarea value={text} onChange={e => setText(e.target.value)} rows={12}
+            placeholder={"Spaghetti Bolognese\n\nFür 4 Portionen\n\nZutaten:\n500 g Spaghetti\n400 g Hackfleisch\n2 Dose Tomaten\n1 Zwiebel\n2 Zehen Knoblauch\n2 EL Olivenöl\nSalz und Pfeffer\n\nZubereitung:\n1. Zwiebel und Knoblauch hacken...\n2. Hackfleisch anbraten..."}
+            style={{ ...inputStyle, resize: "vertical", marginBottom: 16, fontFamily: "monospace", fontSize: 13, lineHeight: 1.5 }} />
+
+          <Btn onClick={handleParse} style={{ width: "100%", justifyContent: "center", padding: "14px 20px", fontSize: 16 }}>
+            🔍 Text analysieren
+          </Btn>
+        </>
+      ) : (
+        <>
+          <div style={{ background: theme.successSoft, border: `1px solid ${theme.success}`, borderRadius: theme.radiusSm, padding: "10px 14px", marginBottom: 16, fontSize: 13 }}>
+            ✅ {editIngredients.length} Zutaten erkannt
+            {editSteps && " · Zubereitung erkannt"}
+            {" · Bitte prüfen und ggf. anpassen"}
+          </div>
+
+          <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Name</label>
+          <input value={editName} onChange={e => setEditName(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }} />
+
+          <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Portionen</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+            <Btn variant="secondary" onClick={() => setEditServings(Math.max(1, editServings - 1))} style={{ padding: "8px 14px" }}>−</Btn>
+            <span style={{ fontSize: 18, fontWeight: 600, minWidth: 24, textAlign: "center" }}>{editServings}</span>
+            <Btn variant="secondary" onClick={() => setEditServings(editServings + 1)} style={{ padding: "8px 14px" }}>+</Btn>
+          </div>
+
+          <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Mahlzeit</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {MEAL_TAGS.map(t => (
+              <TagChip key={t} label={t} active={editTags.includes(t)} onClick={() => toggleTag(t)} />
+            ))}
+          </div>
+
+          <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Tags</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+            {ALL_TAGS.filter(t => !MEAL_TAGS.includes(t)).map(t => (
+              <TagChip key={t} label={t} active={editTags.includes(t)} onClick={() => toggleTag(t)} />
+            ))}
+          </div>
+
+          <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Zutaten</label>
+          <div style={{ display: "grid", gap: 8, marginBottom: 8 }}>
+            {editIngredients.map((ing, i) => (
+              <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input value={ing.amount} onChange={e => updateIng(i, "amount", e.target.value)} placeholder="Menge"
+                  type="number" style={{ ...inputStyle, width: 70, padding: "9px 8px", textAlign: "center" }} />
+                <select value={ing.unit} onChange={e => updateIng(i, "unit", e.target.value)}
+                  style={{ ...inputStyle, width: 80, padding: "9px 6px" }}>
+                  {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+                <input value={ing.name} onChange={e => updateIng(i, "name", e.target.value)} placeholder="Zutat"
+                  style={{ ...inputStyle, flex: 1 }} />
+                {editIngredients.length > 1 && (
+                  <button onClick={() => removeIng(i)} style={{
+                    background: "none", border: "none", color: theme.danger, fontSize: 18, cursor: "pointer", padding: 4
+                  }}>✕</button>
+                )}
+              </div>
+            ))}
+          </div>
+          <Btn variant="secondary" onClick={addIng} style={{ marginBottom: 16, width: "100%" }}>＋ Zutat</Btn>
+
+          <label style={{ fontSize: 13, color: theme.textDim, display: "block", marginBottom: 6 }}>Zubereitung</label>
+          <textarea value={editSteps} onChange={e => setEditSteps(e.target.value)} rows={4}
+            style={{ ...inputStyle, resize: "vertical", marginBottom: 12 }} />
+
+          <div style={{ display: "flex", gap: 10 }}>
+            <Btn variant="secondary" onClick={() => setParsed(null)} style={{ flex: 1, justifyContent: "center" }}>← Zurück</Btn>
+            <Btn onClick={handleSave} style={{ flex: 2, justifyContent: "center", fontSize: 16 }}>💾 Speichern</Btn>
+          </div>
+        </>
+      )}
     </div>
   );
 }
