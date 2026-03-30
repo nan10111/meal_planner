@@ -18,7 +18,7 @@ async function fbDelete(col, id) {
 
 // ─── Constants ──────────────────────────────────────────────────────
 const DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
-const MEALS = ["Frühstück", "Mittagessen", "Abendessen"];
+const MEALS = ["Abendessen"];
 const ALL_TAGS = ["Frühstück", "Mittagessen", "Abendessen", "Vegetarisch", "Vegan", "Schnell", "Deftig", "Süß", "Low-Carb", "Asiatisch", "Italienisch", "Deutsch", "Snack"];
 const MEAL_TAGS = ["Frühstück", "Mittagessen", "Abendessen"];
 const UNITS = ["g", "kg", "ml", "l", "EL", "TL", "Stück", "Prise", "Bund", "Dose", "Becher", "Scheibe"];
@@ -131,14 +131,19 @@ export default function App() {
 
   const generatePlan = async () => {
     if (recipes.length === 0) { showToast("Erst Rezepte hinzufügen!"); return; }
+    const usedIds = new Set();
     for (const day of DAYS) {
       for (const meal of MEALS) {
         const key = `${day}-${meal}`;
         // Filter recipes that have the matching meal tag
         const mealRecipes = recipes.filter(r => (r.tags || []).includes(meal));
-        // Fallback to all recipes if none have the tag
         const pool = mealRecipes.length > 0 ? mealRecipes : recipes;
-        const r = pool[Math.floor(Math.random() * pool.length)];
+        // Prefer unused recipes to avoid duplicates
+        let available = pool.filter(r => !usedIds.has(r.id));
+        // If all used up, allow duplicates
+        if (available.length === 0) available = pool;
+        const r = available[Math.floor(Math.random() * available.length)];
+        usedIds.add(r.id);
         await fbPut(weekplanCol, { id: key, day, meal, recipeId: r.id });
       }
     }
