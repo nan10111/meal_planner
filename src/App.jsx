@@ -8,6 +8,8 @@ import {
 const recipesCol = collection(db, "recipes");
 const weekplanCol = collection(db, "weekplan");
 const customItemsCol = collection(db, "customItems");
+const shoppingListCol = collection(db, "shoppingList");
+const checkedItemsCol = collection(db, "checkedItems");
 
 async function fbPut(col, item) {
   await setDoc(doc(col, item.id), item);
@@ -42,6 +44,59 @@ function categorize(name) {
   return "Sonstiges";
 }
 
+// ─── Unit Normalization ─────────────────────────────────────────────
+// Converts common "Stück" items to their gram/ml equivalents for aggregation
+const UNIT_CONVERSIONS = {
+  "butter": { from: "Stück", to: "g", factor: 250 },
+  "ei": { from: "Stück", to: "Stück", factor: 1 },
+  "eier": { from: "Stück", to: "Stück", factor: 1 },
+  "knoblauchzehe": { from: "Stück", to: "Stück", factor: 1 },
+  "zwiebel": { from: "Stück", to: "Stück", factor: 1 },
+  "zitrone": { from: "Stück", to: "Stück", factor: 1 },
+  "sahne": { from: "Becher", to: "ml", factor: 200 },
+  "schmand": { from: "Becher", to: "g", factor: 200 },
+  "joghurt": { from: "Becher", to: "g", factor: 150 },
+  "crème fraîche": { from: "Becher", to: "g", factor: 200 },
+  "milch": { from: "Becher", to: "ml", factor: 250 },
+  "tomaten": { from: "Dose", to: "g", factor: 400 },
+  "mais": { from: "Dose", to: "g", factor: 285 },
+  "bohnen": { from: "Dose", to: "g", factor: 400 },
+  "kichererbsen": { from: "Dose", to: "g", factor: 400 },
+  "kokosmilch": { from: "Dose", to: "ml", factor: 400 },
+};
+
+// Normalize weight units to grams, volume to ml
+function normalizeUnit(amount, unit) {
+  if (unit === "kg") return { amount: amount * 1000, unit: "g" };
+  if (unit === "l") return { amount: amount * 1000, unit: "ml" };
+  return { amount, unit };
+}
+
+function normalizeIngredient(ing) {
+  let { name, amount, unit } = ing;
+  const lower = name.toLowerCase();
+
+  // Check if there's a Stück/Dose/Becher → g/ml conversion
+  for (const [keyword, conv] of Object.entries(UNIT_CONVERSIONS)) {
+    if (lower.includes(keyword) && unit === conv.from) {
+      amount = amount * conv.factor;
+      unit = conv.to;
+      break;
+    }
+  }
+
+  // Normalize kg→g, l→ml
+  const norm = normalizeUnit(amount, unit);
+  return { name, amount: norm.amount, unit: norm.unit };
+}
+
+// Format display: convert back to kg/l if large
+function formatAmount(amount, unit) {
+  if (unit === "g" && amount >= 1000) return { amount: Math.round(amount / 100) / 10, unit: "kg" };
+  if (unit === "ml" && amount >= 1000) return { amount: Math.round(amount / 100) / 10, unit: "l" };
+  return { amount: Math.round(amount * 10) / 10, unit };
+}
+
 // ─── Theme ──────────────────────────────────────────────────────────
 const theme = {
   bg: "#0f1117", surface: "#1a1d27", surfaceHover: "#222636", card: "#1e2230",
@@ -66,6 +121,7 @@ export default function App() {
   const [viewRecipe, setViewRecipe] = useState(null);
   const [shoppingList, setShoppingList] = useState(null);
   const [customItems, setCustomItems] = useState([]);
+  const [checkedItems, setCheckedItems] = useState({});
   const [showImport, setShowImport] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -74,7 +130,9 @@ export default function App() {
     let recipesLoaded = false;
     let planLoaded = false;
     let customLoaded = false;
-    const checkLoaded = () => { if (recipesLoaded && planLoaded && customLoaded) setLoaded(true); };
+    let shoppingLoaded = false;
+    let checkedLoaded = false;
+    const checkLoaded = () => { if (recipesLoaded && planLoaded && customLoaded && shoppingLoaded && checkedLoaded) setLoaded(true); };
 
     const unsubRecipes = onSnapshot(query(recipesCol), (snap) => {
       const data = snap.docs.map(d => d.data());
@@ -97,7 +155,26 @@ export default function App() {
       checkLoaded();
     });
 
-    return () => { unsubRecipes(); unsubPlan(); unsubCustom(); };
+    const unsubShopping = onSnapshot(query(shoppingListCol), (snap) => {
+      if (snap.docs.length > 0) {
+        const data = snap.docs[0].data();
+        setShoppingList(data.grouped || null);
+      } else {
+        setShoppingList(null);
+      }
+      shoppingLoaded = true;
+      checkLoaded();
+    });
+
+    const unsubChecked = onSnapshot(query(checkedItemsCol), (snap) => {
+      const items = {};
+      snap.docs.forEach(d => { items[d.id] = d.data().checked; });
+      setCheckedItems(items);
+      checkedLoaded = true;
+      checkLoaded();
+    });
+
+    return () => { unsubRecipes(); unsubPlan(); unsubCustom(); unsubShopping(); unsubChecked(); };
   }, []);
 
   const showToast = useCallback((msg) => {
@@ -168,15 +245,17 @@ export default function App() {
     await fbDelete(customItemsCol, id);
   };
 
-  const generateShoppingList = () => {
+  const generateShoppingList = async () => {
     const items = {};
     Object.values(weekPlan).forEach(({ recipeId }) => {
       const r = recipes.find(x => x.id === recipeId);
       if (!r) return;
       r.ingredients.forEach(ing => {
-        const key = `${ing.name.toLowerCase()}_${ing.unit}`;
-        if (items[key]) { items[key].amount += ing.amount; }
-        else { items[key] = { ...ing, amount: ing.amount }; }
+        // Normalize units before aggregating
+        const norm = normalizeIngredient(ing);
+        const key = `${norm.name.toLowerCase()}_${norm.unit}`;
+        if (items[key]) { items[key].amount += norm.amount; }
+        else { items[key] = { name: norm.name, amount: norm.amount, unit: norm.unit }; }
       });
     });
     const grouped = {};
@@ -186,8 +265,18 @@ export default function App() {
       grouped[cat].push(item);
     });
     Object.values(grouped).forEach(arr => arr.sort((a, b) => a.name.localeCompare(b.name)));
-    setShoppingList(grouped);
+    // Save to Firestore for sync
+    await fbPut(shoppingListCol, { id: "current", grouped });
     showToast("Einkaufsliste aktualisiert ✓");
+  };
+
+  const toggleChecked = async (key) => {
+    const newVal = !checkedItems[key];
+    if (newVal) {
+      await fbPut(checkedItemsCol, { id: key, checked: true });
+    } else {
+      await fbDelete(checkedItemsCol, key);
+    }
   };
 
   if (!loaded) return (
@@ -243,7 +332,8 @@ export default function App() {
         {view === "shopping" && (
           <ShoppingListView list={shoppingList} onBack={() => setView("plan")}
             customItems={customItems} onAddCustom={addCustomItem} onRemoveCustom={removeCustomItem}
-            weekPlan={weekPlan} recipes={recipes} onGenerateList={generateShoppingList} />
+            weekPlan={weekPlan} recipes={recipes} onGenerateList={generateShoppingList}
+            checkedItems={checkedItems} onToggleChecked={toggleChecked} />
         )}
       </div>
 
@@ -995,15 +1085,13 @@ function RecipeImport({ onSave, onCancel }) {
 
 
 // ─── Shopping List ──────────────────────────────────────────────────
-function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCustom, weekPlan, recipes, onGenerateList }) {
-  const [checked, setChecked] = useState({});
+function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCustom, weekPlan, recipes, onGenerateList, checkedItems, onToggleChecked }) {
   const [newItem, setNewItem] = useState("");
-  const toggle = (key) => setChecked(prev => ({ ...prev, [key]: !prev[key] }));
 
   const categories = list ? Object.keys(list).sort() : [];
   const recipeItemCount = list ? Object.values(list).reduce((s, arr) => s + arr.length, 0) : 0;
   const total = recipeItemCount + customItems.length;
-  const done = Object.values(checked).filter(Boolean).length;
+  const done = Object.values(checkedItems).filter(Boolean).length;
 
   const hasWeekPlan = Object.keys(weekPlan).length > 0;
 
@@ -1044,10 +1132,11 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
           <h3 style={{ fontSize: 13, fontWeight: 600, color: theme.accent, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>{cat}</h3>
           <div style={{ background: theme.card, borderRadius: theme.radiusSm, overflow: "hidden" }}>
             {list[cat].map((item, i) => {
-              const key = `${cat}_${item.name}_${item.unit}`;
-              const isDone = checked[key];
+              const key = `shop_${cat}_${item.name}_${item.unit}`;
+              const isDone = checkedItems[key];
+              const display = formatAmount(item.amount, item.unit);
               return (
-                <div key={i} onClick={() => toggle(key)} style={{
+                <div key={i} onClick={() => onToggleChecked(key)} style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
                   padding: "11px 14px", cursor: "pointer",
                   borderBottom: i < list[cat].length - 1 ? `1px solid ${theme.border}` : "none",
@@ -1062,7 +1151,7 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
                     <span style={{ textDecoration: isDone ? "line-through" : "none", fontSize: 14 }}>{item.name}</span>
                   </div>
                   <span style={{ color: theme.accent, fontWeight: 600, fontSize: 13 }}>
-                    {Math.round(item.amount * 10) / 10} {item.unit}
+                    {display.amount} {display.unit}
                   </span>
                 </div>
               );
@@ -1086,7 +1175,7 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
           <div style={{ background: theme.card, borderRadius: theme.radiusSm, overflow: "hidden" }}>
             {customItems.map((item, i) => {
               const key = `custom_${item.id}`;
-              const isDone = checked[key];
+              const isDone = checkedItems[key];
               return (
                 <div key={item.id} style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -1094,7 +1183,7 @@ function ShoppingListView({ list, onBack, customItems, onAddCustom, onRemoveCust
                   borderBottom: i < customItems.length - 1 ? `1px solid ${theme.border}` : "none",
                   opacity: isDone ? 0.4 : 1, transition: "opacity .2s"
                 }}>
-                  <div onClick={() => toggle(key)} style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, cursor: "pointer" }}>
+                  <div onClick={() => onToggleChecked(key)} style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, cursor: "pointer" }}>
                     <div style={{
                       width: 22, height: 22, borderRadius: 6, border: `2px solid ${isDone ? theme.success : theme.border}`,
                       background: isDone ? theme.successSoft : "transparent",
