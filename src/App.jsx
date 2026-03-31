@@ -1,21 +1,45 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { db } from "./firebase.js";
 import {
-  collection, doc, setDoc, deleteDoc, onSnapshot, query
+  collection, doc, setDoc, deleteDoc, onSnapshot, query, getDocs
 } from "firebase/firestore";
 
 // ─── Firestore Helpers ──────────────────────────────────────────────
-const recipesCol = collection(db, "recipes");
-const weekplanCol = collection(db, "weekplan");
-const customItemsCol = collection(db, "customItems");
-const shoppingListCol = collection(db, "shoppingList");
-const checkedItemsCol = collection(db, "checkedItems");
+function getCol(householdId, name) {
+  return collection(db, "households", householdId, name);
+}
 
 async function fbPut(col, item) {
   await setDoc(doc(col, item.id), item);
 }
 async function fbDelete(col, id) {
   await deleteDoc(doc(col, id));
+}
+
+// ─── Household Code Generator ───────────────────────────────────────
+function generateCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+// ─── Migration: copy old flat collections into a household ──────────
+async function migrateOldData(householdId) {
+  const oldCollections = ["recipes", "weekplan", "customItems", "shoppingList", "checkedItems"];
+  let migrated = 0;
+  for (const colName of oldCollections) {
+    try {
+      const snap = await getDocs(collection(db, colName));
+      if (snap.empty) continue;
+      const newCol = getCol(householdId, colName);
+      for (const d of snap.docs) {
+        await setDoc(doc(newCol, d.id), d.data());
+        migrated++;
+      }
+    } catch (e) { /* ignore errors for non-existent collections */ }
+  }
+  return migrated;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────
@@ -112,6 +136,7 @@ const theme = {
 
 // ─── App Component ──────────────────────────────────────────────────
 export default function App() {
+  const [householdId, setHouseholdId] = useState(() => localStorage.getItem("mealplanner_household") || null);
   const [view, setView] = useState("recipes");
   const [recipes, setRecipes] = useState([]);
   const [weekPlan, setWeekPlan] = useState({});
@@ -125,8 +150,18 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [toast, setToast] = useState(null);
 
-  // Real-time sync with Firestore
+  // Household-scoped collections
+  const cols = householdId ? {
+    recipes: getCol(householdId, "recipes"),
+    weekplan: getCol(householdId, "weekplan"),
+    customItems: getCol(householdId, "customItems"),
+    shoppingList: getCol(householdId, "shoppingList"),
+    checkedItems: getCol(householdId, "checkedItems"),
+  } : null;
+
+  // Real-time sync with Firestore (only when household is set)
   useEffect(() => {
+    if (!cols) return;
     let recipesLoaded = false;
     let planLoaded = false;
     let customLoaded = false;
@@ -134,14 +169,13 @@ export default function App() {
     let checkedLoaded = false;
     const checkLoaded = () => { if (recipesLoaded && planLoaded && customLoaded && shoppingLoaded && checkedLoaded) setLoaded(true); };
 
-    const unsubRecipes = onSnapshot(query(recipesCol), (snap) => {
-      const data = snap.docs.map(d => d.data());
-      setRecipes(data);
+    const unsubRecipes = onSnapshot(query(cols.recipes), (snap) => {
+      setRecipes(snap.docs.map(d => d.data()));
       recipesLoaded = true;
       checkLoaded();
     });
 
-    const unsubPlan = onSnapshot(query(weekplanCol), (snap) => {
+    const unsubPlan = onSnapshot(query(cols.weekplan), (snap) => {
       const plan = {};
       snap.docs.forEach(d => { plan[d.id] = d.data(); });
       setWeekPlan(plan);
@@ -149,16 +183,15 @@ export default function App() {
       checkLoaded();
     });
 
-    const unsubCustom = onSnapshot(query(customItemsCol), (snap) => {
+    const unsubCustom = onSnapshot(query(cols.customItems), (snap) => {
       setCustomItems(snap.docs.map(d => d.data()));
       customLoaded = true;
       checkLoaded();
     });
 
-    const unsubShopping = onSnapshot(query(shoppingListCol), (snap) => {
+    const unsubShopping = onSnapshot(query(cols.shoppingList), (snap) => {
       if (snap.docs.length > 0) {
-        const data = snap.docs[0].data();
-        setShoppingList(data.grouped || null);
+        setShoppingList(snap.docs[0].data().grouped || null);
       } else {
         setShoppingList(null);
       }
@@ -166,7 +199,7 @@ export default function App() {
       checkLoaded();
     });
 
-    const unsubChecked = onSnapshot(query(checkedItemsCol), (snap) => {
+    const unsubChecked = onSnapshot(query(cols.checkedItems), (snap) => {
       const items = {};
       snap.docs.forEach(d => { items[d.id] = d.data().checked; });
       setCheckedItems(items);
@@ -175,35 +208,67 @@ export default function App() {
     });
 
     return () => { unsubRecipes(); unsubPlan(); unsubCustom(); unsubShopping(); unsubChecked(); };
-  }, []);
+  }, [householdId]);
 
   const showToast = useCallback((msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   }, []);
 
+  const joinHousehold = (code) => {
+    const upper = code.toUpperCase().trim();
+    localStorage.setItem("mealplanner_household", upper);
+    setHouseholdId(upper);
+  };
+
+  const createHousehold = async (doMigrate) => {
+    const code = generateCode();
+    localStorage.setItem("mealplanner_household", code);
+    // Register household in Firestore
+    await setDoc(doc(db, "households", code), { createdAt: new Date().toISOString() });
+    if (doMigrate) {
+      const count = await migrateOldData(code);
+      setHouseholdId(code);
+      if (count > 0) showToast(`${count} Einträge migriert ✓`);
+    } else {
+      setHouseholdId(code);
+    }
+    return code;
+  };
+
+  const leaveHousehold = () => {
+    localStorage.removeItem("mealplanner_household");
+    setHouseholdId(null);
+    setLoaded(false);
+    setRecipes([]);
+    setWeekPlan({});
+    setCustomItems([]);
+    setShoppingList(null);
+    setCheckedItems({});
+  };
+
+  // ─── Household-scoped CRUD ──────────────────────────────────────
   const saveRecipe = async (recipe) => {
-    await fbPut(recipesCol, recipe);
+    await fbPut(cols.recipes, recipe);
     setShowForm(false);
     setEditRecipe(null);
     showToast("Rezept gespeichert ✓");
   };
 
   const deleteRecipe = async (id) => {
-    await fbDelete(recipesCol, id);
+    await fbDelete(cols.recipes, id);
     setViewRecipe(null);
     showToast("Rezept gelöscht");
   };
 
   const assignMeal = async (day, meal, recipeId) => {
     const key = `${day}-${meal}`;
-    const item = { id: key, day, meal, recipeId };
-    await fbPut(weekplanCol, item);
+    await fbPut(cols.weekplan, { id: key, day, meal, recipeId });
   };
 
   const clearMeal = async (day, meal) => {
     const key = `${day}-${meal}`;
-    await fbDelete(weekplanCol, key);
+    await fbDelete(cols.weekplan, key);
   };
 
   const generatePlan = async () => {
@@ -212,16 +277,13 @@ export default function App() {
     for (const day of DAYS) {
       for (const meal of MEALS) {
         const key = `${day}-${meal}`;
-        // Filter recipes that have the matching meal tag
         const mealRecipes = recipes.filter(r => (r.tags || []).includes(meal));
         const pool = mealRecipes.length > 0 ? mealRecipes : recipes;
-        // Prefer unused recipes to avoid duplicates
         let available = pool.filter(r => !usedIds.has(r.id));
-        // If all used up, allow duplicates
         if (available.length === 0) available = pool;
         const r = available[Math.floor(Math.random() * available.length)];
         usedIds.add(r.id);
-        await fbPut(weekplanCol, { id: key, day, meal, recipeId: r.id });
+        await fbPut(cols.weekplan, { id: key, day, meal, recipeId: r.id });
       }
     }
     showToast("Wochenplan generiert ✓");
@@ -229,20 +291,18 @@ export default function App() {
 
   const clearPlan = async () => {
     for (const key of Object.keys(weekPlan)) {
-      await fbDelete(weekplanCol, key);
+      await fbDelete(cols.weekplan, key);
     }
-    setShoppingList(null);
     showToast("Wochenplan geleert ✓");
   };
 
   const addCustomItem = async (name) => {
-    const item = { id: `custom_${Date.now()}`, name: name.trim() };
-    await fbPut(customItemsCol, item);
+    await fbPut(cols.customItems, { id: `custom_${Date.now()}`, name: name.trim() });
     showToast("Artikel hinzugefügt ✓");
   };
 
   const removeCustomItem = async (id) => {
-    await fbDelete(customItemsCol, id);
+    await fbDelete(cols.customItems, id);
   };
 
   const generateShoppingList = async () => {
@@ -251,7 +311,6 @@ export default function App() {
       const r = recipes.find(x => x.id === recipeId);
       if (!r) return;
       r.ingredients.forEach(ing => {
-        // Normalize units before aggregating
         const norm = normalizeIngredient(ing);
         const key = `${norm.name.toLowerCase()}_${norm.unit}`;
         if (items[key]) { items[key].amount += norm.amount; }
@@ -265,19 +324,27 @@ export default function App() {
       grouped[cat].push(item);
     });
     Object.values(grouped).forEach(arr => arr.sort((a, b) => a.name.localeCompare(b.name)));
-    // Save to Firestore for sync
-    await fbPut(shoppingListCol, { id: "current", grouped });
+    await fbPut(cols.shoppingList, { id: "current", grouped });
     showToast("Einkaufsliste aktualisiert ✓");
   };
 
   const toggleChecked = async (key) => {
     const newVal = !checkedItems[key];
     if (newVal) {
-      await fbPut(checkedItemsCol, { id: key, checked: true });
+      await fbPut(cols.checkedItems, { id: key, checked: true });
     } else {
-      await fbDelete(checkedItemsCol, key);
+      await fbDelete(cols.checkedItems, key);
     }
   };
+
+  // ─── No household yet → show join/create screen ─────────────────
+  if (!householdId) return (
+    <div style={{ background: theme.bg, minHeight: "100vh", fontFamily: theme.font, color: theme.text }}>
+      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+      <HouseholdSetup onCreate={createHousehold} onJoin={joinHousehold} theme={theme} />
+      <style>{`* { box-sizing: border-box; } input { font-family: ${theme.font}; }`}</style>
+    </div>
+  );
 
   if (!loaded) return (
     <div style={{ background: theme.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: theme.font }}>
@@ -294,7 +361,10 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 28 }}>🍽️</span>
           <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, background: `linear-gradient(135deg, ${theme.accent}, #f0a860)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>MealPlanner</h1>
-          <span style={{ marginLeft: "auto", fontSize: 10, color: theme.success, background: theme.successSoft, padding: "3px 8px", borderRadius: 20, fontWeight: 600 }}>● Sync</span>
+          <span style={{ marginLeft: "auto", fontSize: 10, color: theme.success, background: theme.successSoft, padding: "3px 8px", borderRadius: 20, fontWeight: 600, cursor: "pointer" }}
+            onClick={() => { if (confirm(`Haushalt: ${householdId}\nAbmelden?`)) leaveHousehold(); }}>
+            🏠 {householdId}
+          </span>
         </div>
       </div>
 
@@ -367,6 +437,116 @@ export default function App() {
         input, textarea, select { font-family: ${theme.font}; }
         ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: ${theme.border}; border-radius: 4px; }
       `}</style>
+    </div>
+  );
+}
+
+// ─── Household Setup Screen ─────────────────────────────────────────
+function HouseholdSetup({ onCreate, onJoin, theme }) {
+  const [mode, setMode] = useState(null); // null, "create", "join"
+  const [code, setCode] = useState("");
+  const [newCode, setNewCode] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleCreate = async (migrate) => {
+    setLoading(true);
+    const c = await onCreate(migrate);
+    setNewCode(c);
+    setLoading(false);
+  };
+
+  const inputStyle = {
+    width: "100%", padding: "14px 16px", background: theme.surface, border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm, color: theme.text, fontSize: 22, outline: "none",
+    textAlign: "center", letterSpacing: 8, fontWeight: 700, textTransform: "uppercase"
+  };
+
+  return (
+    <div style={{ padding: "60px 24px", maxWidth: 400, margin: "0 auto" }}>
+      <div style={{ textAlign: "center", marginBottom: 40 }}>
+        <div style={{ fontSize: 56, marginBottom: 16 }}>🍽️</div>
+        <h1 style={{ margin: "0 0 8px", fontSize: 28, fontWeight: 700, background: `linear-gradient(135deg, ${theme.accent}, #f0a860)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>MealPlanner</h1>
+        <p style={{ color: theme.textDim, fontSize: 14, margin: 0 }}>Gemeinsam planen, einkaufen, kochen</p>
+      </div>
+
+      {!mode && !newCode && (
+        <div style={{ display: "grid", gap: 12 }}>
+          <button onClick={() => setMode("create")} style={{
+            background: theme.accent, color: "#fff", border: "none", borderRadius: theme.radius,
+            padding: "18px 20px", fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: theme.font
+          }}>🏠 Neuen Haushalt erstellen</button>
+          <button onClick={() => setMode("join")} style={{
+            background: theme.surface, color: theme.text, border: `1px solid ${theme.border}`, borderRadius: theme.radius,
+            padding: "18px 20px", fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: theme.font
+          }}>🔗 Haushalt beitreten</button>
+        </div>
+      )}
+
+      {mode === "create" && !newCode && (
+        <div>
+          <p style={{ color: theme.textDim, fontSize: 14, marginBottom: 20, lineHeight: 1.5, textAlign: "center" }}>
+            Erstelle einen neuen Haushalt. Du bekommst einen Code, den du mit deinem Partner teilen kannst.
+          </p>
+          <div style={{ display: "grid", gap: 10 }}>
+            <button onClick={() => handleCreate(true)} disabled={loading} style={{
+              background: theme.accent, color: "#fff", border: "none", borderRadius: theme.radius,
+              padding: "16px", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: theme.font,
+              opacity: loading ? 0.6 : 1
+            }}>{loading ? "⏳ Wird erstellt..." : "📦 Erstellen + bestehende Rezepte migrieren"}</button>
+            <button onClick={() => handleCreate(false)} disabled={loading} style={{
+              background: theme.surface, color: theme.text, border: `1px solid ${theme.border}`, borderRadius: theme.radius,
+              padding: "16px", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: theme.font,
+              opacity: loading ? 0.6 : 1
+            }}>Leer erstellen (ohne Migration)</button>
+            <button onClick={() => setMode(null)} style={{
+              background: "none", border: "none", color: theme.textDim, fontSize: 14, cursor: "pointer",
+              fontFamily: theme.font, padding: 10
+            }}>← Zurück</button>
+          </div>
+        </div>
+      )}
+
+      {newCode && (
+        <div style={{ textAlign: "center" }}>
+          <p style={{ color: theme.textDim, fontSize: 14, marginBottom: 16 }}>Dein Haushaltscode:</p>
+          <div style={{
+            background: theme.surface, border: `2px solid ${theme.accent}`, borderRadius: theme.radius,
+            padding: "20px", fontSize: 36, fontWeight: 700, letterSpacing: 8, color: theme.accent,
+            marginBottom: 16
+          }}>{newCode}</div>
+          <p style={{ color: theme.textDim, fontSize: 13, marginBottom: 24, lineHeight: 1.5 }}>
+            Teile diesen Code mit deinem Partner. Damit kommt man in euren gemeinsamen Haushalt.
+          </p>
+          <button onClick={() => onJoin(newCode)} style={{
+            background: theme.accent, color: "#fff", border: "none", borderRadius: theme.radius,
+            padding: "16px 32px", fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: theme.font,
+            width: "100%"
+          }}>Los geht's →</button>
+        </div>
+      )}
+
+      {mode === "join" && (
+        <div>
+          <p style={{ color: theme.textDim, fontSize: 14, marginBottom: 16, textAlign: "center" }}>
+            Gib den 6-stelligen Haushaltscode ein:
+          </p>
+          <input value={code} onChange={e => setCode(e.target.value.toUpperCase().slice(0, 6))}
+            placeholder="Z.B. K7X2M9" maxLength={6}
+            onKeyDown={e => { if (e.key === "Enter" && code.length === 6) onJoin(code); }}
+            style={inputStyle} />
+          <div style={{ display: "grid", gap: 10, marginTop: 16 }}>
+            <button onClick={() => onJoin(code)} disabled={code.length !== 6} style={{
+              background: code.length === 6 ? theme.accent : theme.surface, color: code.length === 6 ? "#fff" : theme.textMuted,
+              border: "none", borderRadius: theme.radius, padding: "16px", fontSize: 16, fontWeight: 600,
+              cursor: code.length === 6 ? "pointer" : "default", fontFamily: theme.font
+            }}>Beitreten</button>
+            <button onClick={() => setMode(null)} style={{
+              background: "none", border: "none", color: theme.textDim, fontSize: 14, cursor: "pointer",
+              fontFamily: theme.font, padding: 10
+            }}>← Zurück</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
